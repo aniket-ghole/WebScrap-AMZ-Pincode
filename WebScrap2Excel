@@ -1,0 +1,164 @@
+
+# CODE for Hawkins Cookers Amazon Web Scapping using Pincode for Geolocation works fine. Folder created -- 
+# -- for scrapped data along with screenshot of each product page.
+
+import os
+import time
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+# --------- User input section ---------
+brand = "Hawkins Cookers Ltd"
+pincode_input = input("Enter pincodes separated by commas (e.g. 400001,110001,560001): ")
+pincodes = [p.strip() for p in pincode_input.split(',') if p.strip()]
+
+max_pages = 20  # Cap on pages per pincode
+out_dir = "scraped_data"
+screenshot_dir = os.path.join(out_dir, "screenshots")
+os.makedirs(out_dir, exist_ok=True)
+os.makedirs(screenshot_dir, exist_ok=True)
+excel_path = os.path.join(out_dir, "hawkins_amazon_pincode_scrape.xlsx")
+# --------------------------------------
+
+def setup_driver(headless=True):
+    options = Options()
+    if headless:
+        options.add_argument("--headless=new")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    return webdriver.Chrome(options=options)
+
+def set_location_amazon(driver, pincode):
+    print(f"Setting Amazon location to pincode: {pincode} ...")
+    driver.get("https://www.amazon.in/")
+    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "nav-global-location-popover-link")))
+    time.sleep(2)
+    try:
+        driver.find_element(By.ID, "nav-global-location-popover-link").click()
+        time.sleep(1)
+        pin_input = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "GLUXZipUpdateInput")))
+        pin_input.clear()
+        pin_input.send_keys(pincode)
+        driver.find_element(By.XPATH, "//input[@aria-labelledby='GLUXZipUpdate-announce']").click()
+        time.sleep(1)
+        try:
+            done_btn = driver.find_element(By.NAME, "glowDoneButton")
+            done_btn.click()
+        except Exception:
+            pass
+        time.sleep(2)
+        # Close popups
+        try:
+            driver.find_element(By.XPATH, "//button[@data-action='a-popover-close']").click()
+        except Exception: pass
+        print(f"Amazon pincode set to {pincode}")
+        return True
+    except Exception as e:
+        print(f"Amazon location not set for pincode {pincode}: {e}")
+        return False
+
+def search_amazon(driver, keyword):
+    print(f"Searching Amazon for '{keyword}' ...")
+    try:
+        box = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.ID, "twotabsearchtextbox")))
+        box.clear()
+        box.send_keys(keyword)
+        box.send_keys(Keys.RETURN)
+        time.sleep(3)
+    except Exception as e:
+        print("Amazon search failed:", e)
+
+def get_all_amazon_product_links(driver, max_pages=20):
+    print("Extracting all Amazon product links ...")
+    links = []
+    page = 1
+    while page <= max_pages:
+        print(f"Scanning Amazon page {page}")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.XPATH, "//div[@data-component-type='s-search-result']")))
+        items = driver.find_elements(By.XPATH, "//div[@data-component-type='s-search-result']")
+        for item in items:
+            try:
+                url = item.find_element(By.TAG_NAME, "a").get_attribute("href")
+                if url and url.startswith("https://www.amazon.in"):
+                    links.append(url)
+            except Exception:
+                continue
+        # Try to click next page
+        try:
+            next_button = driver.find_element(By.XPATH, "//a[contains(@class,'s-pagination-next') and not(contains(@class,'disabled'))]")
+            driver.execute_script("arguments[0].scrollIntoView();", next_button)
+            next_button.click()
+            time.sleep(3)
+            page += 1
+        except Exception:
+            print("No more Amazon pages or unable to find Next button.")
+            break
+    print(f"Total Amazon products found: {len(links)}")
+    return list(dict.fromkeys(links))
+
+def extract_amazon_details_and_screenshot(driver, url, idx, pincode):
+    driver.get(url)
+    time.sleep(2)
+    screenshot_path = os.path.join(screenshot_dir, f"amazon_{pincode}_product_{idx+1}.png")
+    driver.save_screenshot(screenshot_path)
+    def get_text(by, value):
+        try: return driver.find_element(by, value).text.strip()
+        except: return ""
+    title = get_text(By.ID, "productTitle")
+    price = get_text(By.CLASS_NAME, "a-price-whole")
+    if not price:
+        price = get_text(By.ID, "priceblock_ourprice")
+    if not price:
+        price = get_text(By.ID, "priceblock_dealprice")
+    rating = get_text(By.ID, "acrPopover")
+    seller = ""
+    for by, value in [
+        (By.ID, "sellerProfileTriggerId"),
+        (By.ID, "merchant-info"),
+        (By.XPATH, "//a[@id='bylineInfo']"),
+        (By.XPATH, "//div[@id='tabular-buybox']//div[contains(text(),'Sold by')]"),
+        (By.XPATH, "//div[contains(@id,'merchant-info')]"),
+        (By.XPATH, "//div[contains(text(),'Sold by')]"),
+    ]:
+        seller = get_text(by, value)
+        if seller: break
+    return {
+        "site": "Amazon",
+        "title": title,
+        "price": price,
+        "rating": rating,
+        "seller": seller,
+        "url": url,
+        "pincode": pincode,
+        "screenshot": screenshot_path
+    }
+
+# --- Main scraping process for all pincodes ---
+all_data = []
+for pincode in pincodes:
+    print(f"\n=== Scraping for Amazon, pincode: {pincode} ===")
+    driver = setup_driver(headless=True)
+    try:
+        if not set_location_amazon(driver, pincode):
+            print(f"Skipping {pincode}: could not set location on Amazon.")
+            continue
+        search_amazon(driver, brand)
+        links = get_all_amazon_product_links(driver, max_pages)
+        for idx, link in enumerate(links):
+            print(f"Scraping product {idx+1}/{len(links)} for pincode {pincode} on Amazon")
+            details = extract_amazon_details_and_screenshot(driver, link, idx, pincode)
+            all_data.append(details)
+    finally:
+        driver.quit()
+
+df = pd.DataFrame(all_data)
+df.to_excel(excel_path, index=False)
+print(f"\nData saved in Excel: {excel_path}")
+print(f"Screenshots saved in: {screenshot_dir}")
